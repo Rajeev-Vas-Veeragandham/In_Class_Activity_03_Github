@@ -1,122 +1,375 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(WeatherWithOpenMeteoApp());
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  // This widget is the root of your application.
+class WeatherWithOpenMeteoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: "Open-Meteo Weather",
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(primarySwatch: Colors.indigo),
+      home: WeatherHomePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
+class WeatherHomePage extends StatefulWidget {
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  _WeatherHomePageState createState() => _WeatherHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _WeatherHomePageState extends State<WeatherHomePage> {
+  final TextEditingController cityController = TextEditingController();
 
-  void _incrementCounter() {
+  bool isLoading = false;
+  bool hasData = false;
+  bool showFahrenheit = false; // toggle flag
+
+  String? cityName;
+  double? currentTemp;
+  String currentCondition = "";
+
+  List<DailyForecast> dailyForecast = [];
+
+  // Map Open-Meteo weather codes to human-friendly strings + emoji
+  String weatherCodeToCondition(int code) {
+    if (code == 0) return "☀ Clear";
+    if (code == 1 || code == 2) return "⛅ Partly Cloudy";
+    if (code == 3) return "☁ Overcast";
+    if (code >= 45 && code <= 48) return "🌫 Fog";
+    if (code == 51 || code == 53 || code == 55) return "🌦 Drizzle";
+    if (code >= 56 && code <= 57) return "🧊 Freezing Drizzle";
+    if (code >= 61 && code <= 67) return "🌧 Rain";
+    if (code >= 71 && code <= 77) return "❄ Snow";
+    if (code >= 80 && code <= 82) return "🌧 Showers";
+    if (code >= 85 && code <= 86) return "❄ Snow Showers";
+    if (code >= 95) return "⛈ Thunderstorm";
+    return "❓ Unknown";
+  }
+
+  // Celsius to Fahrenheit
+  double cToF(double c) => (c * 9 / 5) + 32;
+
+  Future<Map<String, double>?> geocodeCity(String city) async {
+    try {
+      final url = Uri.parse(
+        "https://geocoding-api.open-meteo.com/v1/search?name=${Uri.encodeComponent(city)}&count=1",
+      );
+      final resp = await http.get(url);
+      if (resp.statusCode != 200) return null;
+      final data = json.decode(resp.body);
+      if (data == null || data['results'] == null) return null;
+      final results = data['results'] as List<dynamic>;
+      if (results.isEmpty) return null;
+      final first = results[0];
+      return {
+        "lat": (first['latitude'] as num).toDouble(),
+        "lon": (first['longitude'] as num).toDouble(),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<bool> fetchWeather(double lat, double lon) async {
+    try {
+      final url = Uri.parse(
+        "https://api.open-meteo.com/v1/forecast"
+        "?latitude=$lat&longitude=$lon"
+        "&current_weather=true"
+        "&daily=weathercode,temperature_2m_max,temperature_2m_min"
+        "&timezone=auto",
+      );
+      final resp = await http.get(url);
+      if (resp.statusCode != 200) return false;
+
+      final data = json.decode(resp.body);
+      if (data == null) return false;
+
+      final cw = data['current_weather'];
+      if (cw != null) {
+        currentTemp = (cw['temperature'] as num).toDouble();
+        final int code = (cw['weathercode'] as num).toInt();
+        currentCondition = weatherCodeToCondition(code);
+      }
+
+      dailyForecast.clear();
+      final daily = data['daily'];
+      if (daily != null) {
+        final times = List<String>.from(daily['time'] ?? []);
+        final tMax = List<num>.from(daily['temperature_2m_max'] ?? []);
+        final tMin = List<num>.from(daily['temperature_2m_min'] ?? []);
+        final codes = List<num>.from(daily['weathercode'] ?? []);
+
+        for (int i = 0; i < times.length; i++) {
+          dailyForecast.add(
+            DailyForecast(
+              date: times[i],
+              tempMax: (i < tMax.length) ? tMax[i].toDouble() : double.nan,
+              tempMin: (i < tMin.length) ? tMin[i].toDouble() : double.nan,
+              condition: (i < codes.length)
+                  ? weatherCodeToCondition(codes[i].toInt())
+                  : "Unknown",
+            ),
+          );
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void handleGetForecast() async {
+    final city = cityController.text.trim();
+    if (city.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Please enter a city name.")));
+      return;
+    }
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      isLoading = true;
+      hasData = false;
     });
+
+    final loc = await geocodeCity(city);
+    if (loc == null) {
+      setState(() => isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("City not found. Try a different name.")),
+      );
+      return;
+    }
+
+    final success = await fetchWeather(loc['lat']!, loc['lon']!);
+    setState(() {
+      isLoading = false;
+      hasData = success;
+      if (success) cityName = city;
+    });
+
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to fetch weather. Try again.")),
+      );
+    }
+  }
+
+  Widget buildTodayTab() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.indigo.shade100, Colors.white],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          TextField(
+            controller: cityController,
+            decoration: InputDecoration(
+              labelText: "Enter City Name",
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              prefixIcon: Icon(Icons.location_city),
+            ),
+            onSubmitted: (_) => handleGetForecast(),
+          ),
+          SizedBox(height: 12),
+          ElevatedButton.icon(
+            onPressed: isLoading ? null : handleGetForecast,
+            icon: Icon(Icons.cloud),
+            label: Text("Get Forecast"),
+            style: ElevatedButton.styleFrom(
+              padding: EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+          SizedBox(height: 20),
+          Expanded(
+            child: Center(
+              child: isLoading
+                  ? CircularProgressIndicator()
+                  : !hasData
+                  ? Text("No data yet. Enter a city and press Get Forecast.")
+                  : AnimatedSwitcher(
+                      duration: Duration(milliseconds: 600),
+                      transitionBuilder: (child, anim) =>
+                          ScaleTransition(scale: anim, child: child),
+                      child: Column(
+                        key: ValueKey(cityName),
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            cityName ?? "",
+                            style: TextStyle(
+                              fontSize: 30,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.indigo.shade800,
+                            ),
+                          ),
+                          SizedBox(height: 10),
+                          AnimatedDefaultTextStyle(
+                            duration: Duration(milliseconds: 500),
+                            style: TextStyle(
+                              fontSize: 50, // bigger emoji + text
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                            child: Text(currentCondition),
+                          ),
+                          SizedBox(height: 20),
+                          if (currentTemp != null)
+                            Column(
+                              children: [
+                                AnimatedSwitcher(
+                                  duration: Duration(milliseconds: 500),
+                                  transitionBuilder: (child, anim) =>
+                                      FadeTransition(
+                                        opacity: anim,
+                                        child: child,
+                                      ),
+                                  child: Text(
+                                    showFahrenheit
+                                        ? "${cToF(currentTemp!).toStringAsFixed(1)} °F"
+                                        : "${currentTemp!.toStringAsFixed(1)} °C",
+                                    key: ValueKey(showFahrenheit),
+                                    style: TextStyle(
+                                      fontSize: 55,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.indigo.shade900,
+                                    ),
+                                  ),
+                                ),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text("°C"),
+                                    Switch(
+                                      value: showFahrenheit,
+                                      onChanged: (val) =>
+                                          setState(() => showFahrenheit = val),
+                                    ),
+                                    Text("°F"),
+                                  ],
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget buildWeeklyTab() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.white, Colors.indigo.shade50],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
+      padding: EdgeInsets.all(16),
+      child: isLoading
+          ? Center(child: CircularProgressIndicator())
+          : (!hasData || dailyForecast.isEmpty)
+          ? Center(child: Text("No forecast yet. Use Today tab to fetch data."))
+          : ListView.builder(
+              itemCount: dailyForecast.length,
+              itemBuilder: (context, index) {
+                final d = dailyForecast[index];
+                final max = showFahrenheit ? cToF(d.tempMax) : d.tempMax;
+                final min = showFahrenheit ? cToF(d.tempMin) : d.tempMin;
+
+                return AnimatedContainer(
+                  duration: Duration(milliseconds: 400),
+                  margin: EdgeInsets.symmetric(vertical: 8),
+                  child: Card(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 5,
+                    child: ListTile(
+                      leading: Text(
+                        d.condition.split(" ")[0], // emoji
+                        style: TextStyle(fontSize: 36), // bigger symbol
+                      ),
+                      title: Text(
+                        d.date,
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        d.condition.split(" ").skip(1).join(" "),
+                        style: TextStyle(fontSize: 16),
+                      ),
+                      trailing: Text(
+                        "${max.isNaN ? '-' : max.toStringAsFixed(1)}° / ${min.isNaN ? '-' : min.toStringAsFixed(1)}°"
+                        "${showFahrenheit ? 'F' : 'C'}",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  @override
+  void dispose() {
+    cityController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text("🌤 Weather"),
+          bottom: TabBar(
+            indicatorColor: Colors.white,
+            tabs: [
+              Tab(icon: Icon(Icons.today), text: "Today"),
+              Tab(icon: Icon(Icons.calendar_view_week), text: "7-Day"),
+            ],
+          ),
         ),
+        body: TabBarView(children: [buildTodayTab(), buildWeeklyTab()]),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
+}
+
+class DailyForecast {
+  final String date;
+  final double tempMax;
+  final double tempMin;
+  final String condition;
+
+  DailyForecast({
+    required this.date,
+    required this.tempMax,
+    required this.tempMin,
+    required this.condition,
+  });
 }
